@@ -1,20 +1,21 @@
-from pydantic import BaseModel, Field, PositiveInt
+from pydantic import BaseModel, Field, PositiveInt, ConfigDict
 
 class TripBase(BaseModel):
-    destination: str = Field(..., description="The trip destination", examples=["France", "Paris"])
-    days: PositiveInt = Field(..., description="How many days the trip will take", examples=[7])
-    budget: PositiveInt = Field(..., description="The trip Budget in USD", examples=["$2500"])
-    trip_style: str = Field(..., description="The type of Trip", examples=["adventure", "tourism"])
+    destination: str = Field(..., examples=["Paris"])
+    days: PositiveInt = Field(..., examples=[5])
+    budget: PositiveInt = Field(..., examples=[1500])
+    trip_style: str = Field(..., examples=["budget"])
 
 class TripCreate(TripBase):
     pass
 
 class TripUpdate(BaseModel):
-    destination: str | None
-    days: PositiveInt | None
-    budget: PositiveInt | None
-    trip_Style: str | None
+    destination: str | None = None
+    days: PositiveInt | None = None
+    budget: PositiveInt | None = None
+    trip_style: str | None = None
 
 class TripResponse(TripBase):
-    id: PositiveInt
-    message: str
+    id: int
+
+    model_config = ConfigDict(from_attributes=True)

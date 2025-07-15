@@ -154,6 +154,6 @@ For inquiries, suggestions, or collaboration requests, reach out at gisachrismun
 
 ## License
 
-Copyright © 2025 gisachris. All Rights Reserved.
+Copyright © 2026 gisachris. All Rights Reserved.
 
 This project and its source code are proprietary. No part of this codebase may be copied, modified, distributed, or used in any form without explicit written permission from the owner.
