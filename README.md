@@ -32,11 +32,28 @@
 
 ### Prerequisites
 
-> _Coming soon..._
+- [Python](https://www.python.org/downloads/) >= 3.14
+- [Poetry](https://python-poetry.org/docs/#installation) >= 2.0.0
 
 ### Installation
 
-> _Coming soon..._
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/gisachris/nexTrip-ai.git
+   cd nexTrip-ai
+   ```
+
+2. Install dependencies:
+   ```bash
+   poetry install
+   ```
+
+3. Start the application:
+   ```bash
+   poetry run start
+   ```
+
+The API will be available at `http://localhost:8000`.
 
 ---
 
