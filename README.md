@@ -2,8 +2,6 @@
   <img src="src/nextrip_ai/static/images/logo.png" alt="nexTrip AI Logo" width="200"/>
 </p>
 
-<h1 align="center">nexTrip AI</h1>
-
 <p align="center">
   <em>nexTrip AI is an AI powered vacation planner. From finding the most attractive and cost efficient locations around the globe to booking and itinerary planning. Planning your next Trip has never been easier.</em>
 </p>
