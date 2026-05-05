@@ -1,0 +1,17 @@
+[project]
+name = "nextrip_ai"
+version = "0.1.0"
+description = "\"nexTrip AI is an AI powered vacation planner. From finding the most attractive and cost efficient locations around the globe to booking and itinerary planning. Planning your next Trip has never been easier.\""
+authors = [
+    {name = "gdev",email = "125574259+gisachris@users.noreply.github.com."}
+]
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi (>=0.136.1,<0.137.0)",
+    "uvicorn (>=0.46.0,<0.47.0)"
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
