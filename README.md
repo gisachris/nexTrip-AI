@@ -24,7 +24,14 @@
 
 ## Features
 
-> _Coming soon..._
+- 🌍 **Destination Suggestions** — Discover the most attractive and cost-efficient travel destinations around the globe tailored to your preferences
+- 🗓️ **Itinerary Generation** — Automatically generate detailed, day-by-day travel plans based on your destination, budget, and travel style
+- 📡 **Real-time Information** — Fetch up-to-date data on maps, weather forecasts, and pricing to keep your plans accurate
+- 🧠 **Conversation Context** — Remembers your preferences and past interactions to deliver a seamless, personalized planning experience
+- 📚 **Knowledge Retrieval (RAG)** — Leverages a retrieval-augmented generation system to provide rich, accurate travel knowledge
+- 🔧 **Tool Integration** — Connects to external APIs, search engines, and mapping services to power intelligent recommendations
+- 🎙️ **Multimodal Input** — Interact via text, voice, or images for a natural and flexible user experience
+- 🔒 **Secure & Production-ready** — Built with security, evaluation, and scalability in mind from the ground up
 
 ---
 
