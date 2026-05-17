@@ -1,15 +1,12 @@
 from fastapi import APIRouter
 
-authRouter = APIRouter(
-    prefix="auth",
-    tags=["authentication"]
-)
+authRouter = APIRouter()
 
-@authRouter.post("/register")
+@authRouter.post("/auth/register")
 def registerUser():
     pass
 
-@authRouter.post("/login")
+@authRouter.post("/auth/login")
 def loginUser():
     pass
 
