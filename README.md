@@ -66,7 +66,69 @@ The API will be available at `http://localhost:8000`.
 
 ## Usage
 
-> _Coming soon..._
+Once the application is running at `http://localhost:8000`, you can interact with the following API endpoints:
+
+### Authentication
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/auth/register` | Register a new user |
+| `POST` | `/auth/login` | Login and receive a JWT token |
+| `GET` | `/users/me` | Get the currently authenticated user |
+
+**Register payload:**
+```json
+{
+  "email": "user@example.com",
+  "username": "johndoe",
+  "password": "SecurePass123!"
+}
+```
+
+**Login payload:**
+```json
+{
+  "username": "john_doe@example.com",
+  "password": "SecurePass123!"
+}
+```
+
+### Trips
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/trips` | Get all trips |
+| `GET` | `/trips/{tripId}` | Get a trip by ID |
+| `POST` | `/trips` | Create a new trip |
+| `PATCH` | `/trips/{tripId}` | Update a trip |
+| `DELETE` | `/trips/{tripId}` | Delete a trip |
+
+**Create/Update trip payload:**
+```json
+{
+  "destination": "Paris",
+  "days": 7,
+  "budget": 2500,
+  "trip_style": "adventure"
+}
+```
+
+### Itineraries
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/itineraries/{itineraryId}` | Get an itinerary by ID |
+| `POST` | `/itineraries` | Generate a new itinerary |
+
+**Itinerary response:**
+```json
+{
+  "trip_id": 1,
+  "days": [
+    { "day": 1, "activities": ["Eiffel Tower", "Seine River Walk"] }
+  ]
+}
+```
 
 ---
 
@@ -84,10 +146,14 @@ The API will be available at `http://localhost:8000`.
 
 ## Contributing
 
-> _Coming soon..._
+This project is developed and maintained solely by [gisachris](https://github.com/gisachris).
+
+For inquiries, suggestions, or collaboration requests, reach out at gisachrismunyangaju@gmail.com.
 
 ---
 
 ## License
 
-> _Coming soon..._
+Copyright © 2026 gisachris. All Rights Reserved.
+
+This project and its source code are proprietary. No part of this codebase may be copied, modified, distributed, or used in any form without explicit written permission from the owner.
