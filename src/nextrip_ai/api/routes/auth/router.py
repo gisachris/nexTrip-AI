@@ -20,7 +20,7 @@ def registerUser(payload: UserCreate, db: Session = Depends(get_db)):
 
 @authRouter.post("/auth/login", response_model=TokenResponse)
 def loginUser(payload: LoginRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == payload.username).first()
+    user = db.query(User).filter(User.email == payload.email).first()
     if not user or not verify_password(payload.password, user.password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     token = create_access_token({"sub": str(user.id)})
