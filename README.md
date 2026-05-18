@@ -88,7 +88,7 @@ Once the application is running at `http://localhost:8000`, you can interact wit
 **Login payload:**
 ```json
 {
-  "username": "john_doe@example.com",
+  "email": "user@example.com",
   "password": "SecurePass123!"
 }
 ```
@@ -134,13 +134,55 @@ Once the application is running at `http://localhost:8000`, you can interact wit
 
 ## Configuration
 
-> _Coming soon..._
+Create a `.env` file in the project root with the following variables:
+
+```env
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/nextrip_ai_db
+SECRET_KEY=your_secret_key_here
+ALGORITHM=HS256
+ACCESS_TOKEN_EXPIRE_MINUTES=30
+```
+
+| Variable | Description |
+|----------|-------------|
+| `DATABASE_URL` | PostgreSQL connection string |
+| `SECRET_KEY` | Secret key used to sign JWT tokens — use a long random string in production |
+| `ALGORITHM` | JWT signing algorithm — `HS256` by default |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | How long a JWT token remains valid in minutes |
 
 ---
 
 ## Architecture
 
-> _Coming soon..._
+The project follows a clean layered structure:
+
+```
+src/nextrip_ai/
+├── api/
+│   └── routes/
+│       ├── auth/         # Register, login, user profile
+│       ├── trips/        # Trip CRUD
+│       └── itineraries/  # Itinerary creation and retrieval
+├── core/
+│   ├── config.py         # Environment-based settings
+│   ├── database.py       # SQLAlchemy engine and session
+│   ├── security.py       # Password hashing and JWT
+│   └── dependencies.py   # Reusable FastAPI dependencies
+├── models/
+│   ├── user.py           # User database model
+│   ├── trip.py           # Trip database model
+│   └── itinerary.py      # Itinerary database model
+├── main.py               # App entry point, router registration
+└── run.py                # Uvicorn server launcher
+```
+
+**Key design decisions:**
+- Each route group owns its schemas alongside its router
+- `core/` is shared infrastructure with no business logic
+- JWT authentication is handled via `HTTPBearer` — token is passed in the `Authorization: Bearer <token>` header
+- Itinerary days and activities are stored as JSON in PostgreSQL
+- All trip and itinerary routes are scoped to the authenticated user — users can only access their own data
+- API is fully documented via Swagger at `/docs`
 
 ---
 
