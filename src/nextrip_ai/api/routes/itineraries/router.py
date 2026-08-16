@@ -12,13 +12,14 @@ from nextrip_ai.core.dependencies import get_db, get_current_user
 from nextrip_ai.models.user import User
 from nextrip_ai.models.trip import Trip
 from nextrip_ai.models.itinerary import Itinerary
-from nextrip_ai.api.routes.itineraries.schema import ItineraryCreate, ItineraryResponse, AIItinerarySchema
+from nextrip_ai.models.document_manifest import DocumentManifest
+from nextrip_ai.api.routes.itineraries.schema import ItineraryCreate, ItineraryResponse, AIItinerarySchema, DocumentIngest
+from nextrip_ai.core.ingest import compute_sha256, chunk_document, upsert_to_pinecone
 
 logger = logging.getLogger(__name__)
 
 itineraryRouter = APIRouter(prefix="/itineraries", tags=["itineraries"])
 
-# Define structured tool schema to force Claude output JSON
 tool_schema = {
     "name": "generate_itinerary",
     "description": "Generate a structured travel itinerary matching the required schema exactly.",
@@ -100,7 +101,6 @@ tool_schema = {
     }
 }
 
-# Define structured tool schemas
 weather_tool_schema = {
     "name": "get_weather",
     "description": "Look up real-time current weather conditions and forecast for a given destination.",
@@ -117,7 +117,6 @@ weather_tool_schema = {
 }
 
 def get_weather(location: str) -> str:
-    """Retrieve weather forecast using Open-Meteo's geocoding and forecast APIs."""
     try:
         encoded_loc = urllib.parse.quote(location)
         geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={encoded_loc}&count=1&language=en&format=json"
@@ -160,7 +159,7 @@ def get_weather(location: str) -> str:
             95: "Thunderstorm", 96: "Thunderstorm with slight hail", 99: "Thunderstorm with heavy hail"
         }
         desc = descriptions.get(weathercode, "Variable/Unspecified")
-        return f"Weather in {name}, {country}: {temp}Â°C, {desc}. Wind speed: {windspeed} km/h."
+        return f"Weather in {name}, {country}: {temp}°C, {desc}. Wind speed: {windspeed} km/h."
     except Exception as e:
         return f"Error looking up weather for '{location}': {str(e)}"
 
@@ -226,7 +225,6 @@ def call_claude_to_generate(trip: Trip, messages: list = None) -> tuple[dict, li
             tools=tools
         )
         
-        # Add assistant response to message history
         assistant_content = []
         for block in response.content:
             if block.type == "text":
@@ -256,11 +254,11 @@ def call_claude_to_generate(trip: Trip, messages: list = None) -> tuple[dict, li
         for tool_call in tool_use_calls:
             if tool_call.name == "get_weather":
                 loc = tool_call.input.get("location", trip.destination)
-                weather_info = get_weather(loc)
+                w_info = get_weather(loc)
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": tool_call.id,
-                    "content": f"Weather lookup results: {weather_info}"
+                    "content": f"Weather lookup results: {w_info}"
                 })
             elif tool_call.name == "generate_itinerary":
                 generate_itinerary_input = tool_call.input
@@ -276,7 +274,6 @@ def call_claude_to_generate(trip: Trip, messages: list = None) -> tuple[dict, li
 def validate_itinerary(data: dict, trip: Trip) -> list[str]:
     errors = []
     
-    # 1. Pydantic Validation
     try:
         validated = AIItinerarySchema.model_validate(data)
     except ValidationError as e:
@@ -285,16 +282,13 @@ def validate_itinerary(data: dict, trip: Trip) -> list[str]:
             errors.append(f"Schema validation error at '{loc}': {err['msg']}")
         return errors
         
-    # 2. Day Count Check
     if len(validated.days) != trip.days:
         errors.append(f"Day count ({len(validated.days)}) does not match trip duration ({trip.days})")
         
-    # 3. Destination Match
     dest = validated.destination
     if trip.destination.lower() not in dest.lower() and dest.lower() not in trip.destination.lower():
         errors.append(f"Destination '{dest}' does not match trip destination '{trip.destination}'")
         
-    # 4. Budget Limit Check
     est_total = validated.estimated_total_cost
     limit = trip.budget * 1.10
     if est_total > limit:
@@ -320,7 +314,6 @@ def createItinerary(payload: ItineraryCreate, db: Session = Depends(get_db), cur
     if db.query(Itinerary).filter(Itinerary.trip_id == payload.trip_id).first():
         raise HTTPException(status_code=400, detail="Itinerary already exists for this trip")
 
-    # Manual creation flow (backwards compatibility)
     if payload.days is not None:
         itinerary = Itinerary(
             trip_id=payload.trip_id,
@@ -333,7 +326,6 @@ def createItinerary(payload: ItineraryCreate, db: Session = Depends(get_db), cur
         db.refresh(itinerary)
         return itinerary
 
-    # AI Itinerary Generation Flow with Agentic Feedback Retry
     attempts = 0
     max_attempts = 3
     messages = None
@@ -350,7 +342,6 @@ def createItinerary(payload: ItineraryCreate, db: Session = Depends(get_db), cur
                 break
             else:
                 logger.error(f"Validation failed on attempt {attempts}: {validation_errors}")
-                # Append validation feedback for the next retry
                 feedback_str = (
                     "The generated itinerary failed validation with the following errors:\n"
                     + "\n".join(f"- {err}" for err in validation_errors)
@@ -360,7 +351,6 @@ def createItinerary(payload: ItineraryCreate, db: Session = Depends(get_db), cur
         except Exception as e:
             logger.error(f"Error on attempt {attempts} during AI generation: {str(e)}")
             validation_errors = [str(e)]
-            # If Claude API failed completely or had a network error, reset messages list
             messages = None
 
     if validation_errors:
@@ -379,3 +369,31 @@ def createItinerary(payload: ItineraryCreate, db: Session = Depends(get_db), cur
     db.commit()
     db.refresh(itinerary)
     return itinerary
+
+@itineraryRouter.post("/ingest", status_code=status.HTTP_201_CREATED)
+def ingestDocument(payload: DocumentIngest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    text_hash = compute_sha256(payload.content)
+    
+    manifest = db.query(DocumentManifest).filter(DocumentManifest.document_id == payload.document_id).first()
+    if manifest:
+        if manifest.content_hash == text_hash:
+            return {"status": "skipped", "message": "Document content unchanged."}
+        manifest.content_hash = text_hash
+    else:
+        manifest = DocumentManifest(document_id=payload.document_id, content_hash=text_hash)
+        db.add(manifest)
+        
+    db.commit()
+    
+    chunks = chunk_document(payload.content)
+    upsert_to_pinecone(
+        namespace=payload.destination.lower(),
+        document_id=payload.document_id,
+        title=payload.title,
+        chunks=chunks,
+        destination=payload.destination,
+        category=payload.category,
+        estimated_cost=payload.estimated_cost
+    )
+    
+    return {"status": "success", "message": f"Ingested {len(chunks)} chunks."}

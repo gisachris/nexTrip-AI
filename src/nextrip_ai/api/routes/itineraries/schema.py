@@ -37,3 +37,11 @@ class ItineraryResponse(BaseModel):
     itinerary_json: AIItinerarySchema | None = None
 
     model_config = ConfigDict(from_attributes=True)
+
+class DocumentIngest(BaseModel):
+    document_id: str
+    title: str
+    content: str
+    destination: str
+    category: str = "attraction"
+    estimated_cost: str = "medium"
