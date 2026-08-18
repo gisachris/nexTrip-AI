@@ -163,12 +163,45 @@ def get_weather(location: str) -> str:
     except Exception as e:
         return f"Error looking up weather for '{location}': {str(e)}"
 
+def query_pinecone_knowledge(destination: str, query_text: str, top_k: int = 4) -> list[dict]:
+    if not settings.PINECONE_API_KEY or "mock" in settings.PINECONE_API_KEY.lower():
+        return []
+        
+    from nextrip_ai.core.ingest import get_embeddings
+    from pinecone import Pinecone
+    
+    try:
+        pc = Pinecone(api_key=settings.PINECONE_API_KEY)
+        index_name = settings.PINECONE_INDEX_NAME
+        existing_indexes = [idx.name for idx in pc.list_indexes()]
+        if index_name not in existing_indexes:
+            return []
+            
+        index = pc.Index(index_name)
+        query_vector = get_embeddings([query_text])[0]
+        
+        res = index.query(
+            namespace=destination.lower(),
+            vector=query_vector,
+            top_k=top_k,
+            include_metadata=True
+        )
+        
+        results = []
+        for match in res.get("matches", []):
+            if match.get("score", 0.0) >= 0.65:
+                results.append(match.get("metadata", {}))
+        return results
+    except Exception as e:
+        logger.error(f"Error querying pinecone: {e}")
+        return []
+
 def call_claude_to_generate(trip: Trip, messages: list = None) -> tuple[dict, list]:
     client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
     
     system_prompt = (
         "You are an expert travel planner.\n\n"
-        "Your task is to create realistic travel itineraries based on trip information and weather conditions.\n\n"
+        "Your task is to create realistic travel itineraries based on trip information, local destination guides, and weather conditions.\n\n"
         "Follow these rules strictly:\n"
         "1. Only recommend attractions, restaurants, landmarks, museums, parks, and activities located inside the specified destination.\n"
         "2. Do not recommend locations outside the destination city or region.\n"
@@ -180,13 +213,38 @@ def call_claude_to_generate(trip: Trip, messages: list = None) -> tuple[dict, li
         "8. Do not invent fictional locations.\n"
         "9. Use well-known and verifiable attractions whenever possible.\n"
         "10. Look up the weather conditions for the destination city using the get_weather tool BEFORE generating the final itinerary, and use the retrieved weather details to optimize the travel plan (e.g., recommend indoor activities if it is rainy/cold, outdoor if sunny/warm).\n"
-        "11. Return ONLY the final JSON itinerary via the generate_itinerary tool call.\n"
-        "12. Do not include markdown.\n"
-        "13. Do not include explanations.\n"
-        "14. Do not include code blocks.\n"
-        "15. The final itinerary must match the required schema exactly."
+        "11. Incorporate local knowledge context from the retrieved travel guides to recommend matching spots.\n"
+        "12. Return ONLY the final JSON itinerary via the generate_itinerary tool call.\n"
+        "13. Do not include markdown.\n"
+        "14. Do not include explanations.\n"
+        "15. Do not include code blocks.\n"
+        "16. The final itinerary must match the required schema exactly."
     )
 
+    retrieved_chunks = query_pinecone_knowledge(trip.destination, f"attractions and guides for {trip.destination} {trip.trip_style}")
+    knowledge_context = ""
+    if retrieved_chunks:
+        knowledge_context = "Retrieved Local Knowledge:\n" + "\n---\n".join(
+            f"Title: {c.get('title')}\nCategory: {c.get('category')}\nContent: {c.get('text')}"
+            for c in retrieved_chunks
+        )
+    else:
+        knowledge_context = "No additional travel knowledge base context found."
+
+    weather_info = get_weather(trip.destination)
+
+    user_content = []
+    if knowledge_context:
+        user_content.append({
+            "type": "text",
+            "text": f"Destination Context:\n{knowledge_context}",
+            "cache_control": {"type": "ephemeral"}
+        })
+    user_content.append({
+        "type": "text",
+        "text": f"Current Weather & Forecast:\n{weather_info}"
+    })
+    
     user_prompt = (
         f"Generate a travel itinerary using the following trip details.\n\n"
         f"Trip Details:\n"
@@ -195,8 +253,7 @@ def call_claude_to_generate(trip: Trip, messages: list = None) -> tuple[dict, li
         f"Budget: {trip.budget}\n"
         f"Travel Style: {trip.trip_style}\n\n"
         f"Requirements:\n"
-        f"* Use the get_weather tool to look up the current weather and forecast for {trip.destination} first.\n"
-        f"* Adjust the activities and suggestions based on the weather forecast.\n"
+        f"* Adjust the activities and suggestions based on the weather forecast and the provided destination context.\n"
         f"* Create a detailed itinerary for every day.\n"
         f"* Keep activities geographically sensible.\n"
         f"* Avoid excessive travel between locations.\n"
@@ -209,9 +266,13 @@ def call_claude_to_generate(trip: Trip, messages: list = None) -> tuple[dict, li
         f"* Use real attractions and locations.\n"
         f"* Use the generate_itinerary tool to return the final result."
     )
+    user_content.append({
+        "type": "text",
+        "text": user_prompt
+    })
 
     if not messages:
-        messages = [{"role": "user", "content": user_prompt}]
+        messages = [{"role": "user", "content": user_content}]
         
     tools = [tool_schema, weather_tool_schema]
 
