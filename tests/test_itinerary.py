@@ -1,5 +1,6 @@
 import pytest
-from nextrip_ai.api.routes.itineraries.router import get_weather, validate_itinerary
+from nextrip_ai.api.routes.itineraries.router import get_weather, validate_itinerary, query_pinecone_knowledge
+from nextrip_ai.core.ingest import chunk_document, compute_sha256
 from nextrip_ai.models.trip import Trip
 from nextrip_ai.api.routes.itineraries.schema import AIItinerarySchema
 
@@ -106,3 +107,24 @@ def test_validate_itinerary_validation_errors():
     assert any("does not match trip destination" in e for e in errors)
     assert any("exceeds budget" in e for e in errors)
     assert any("duration" in e or "Day count" in e for e in errors)
+
+def test_chunk_document():
+    """Verify token-based chunking logic using tiktoken."""
+    doc = "This is a simple travel document used to verify chunking parameters. " * 50
+    chunks = chunk_document(doc, chunk_size=40, overlap=5)
+    assert len(chunks) > 1
+    assert len(chunks[0]) > 0
+
+def test_compute_sha256():
+    """Verify hash computation logic for CDC manifest."""
+    h1 = compute_sha256("test document content")
+    h2 = compute_sha256("test document content")
+    h3 = compute_sha256("different content")
+    assert h1 == h2
+    assert h1 != h3
+
+def test_query_pinecone_mock():
+    """Verify that query_pinecone_knowledge behaves correctly in mock mode."""
+    res = query_pinecone_knowledge("Tokyo", "best sushi spots")
+    assert isinstance(res, list)
+    assert len(res) == 0
