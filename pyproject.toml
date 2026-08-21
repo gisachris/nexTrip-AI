@@ -16,7 +16,11 @@ dependencies = [
     "passlib[bcrypt] (>=1.7.4,<2.0.0)",
     "email-validator (>=2.3.0,<3.0.0)",
     "bcrypt (==4.0.1)",
-    "anthropic (>=0.109.2,<0.110.0)"
+    "anthropic (>=0.109.2,<0.110.0)",
+    "graphifyy (>=0.9.48,<0.10.0)",
+    "openai (>=1.50.0,<2.0.0)",
+    "pinecone (>=5.0.0,<6.0.0)",
+    "tiktoken (>=0.8.0,<0.9.0)"
 ]
 
 

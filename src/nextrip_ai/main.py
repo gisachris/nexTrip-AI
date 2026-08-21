@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from nextrip_ai.core.database import engine, Base
-from nextrip_ai.models import user, trip, itinerary
+from nextrip_ai.models import user, trip, itinerary, document_manifest
 from nextrip_ai.api.routes.auth.router import authRouter
 from nextrip_ai.api.routes.trips.router import trips_router
 from nextrip_ai.api.routes.itineraries.router import itineraryRouter
