@@ -45,3 +45,17 @@ class DocumentIngest(BaseModel):
     destination: str
     category: str = "attraction"
     estimated_cost: str = "medium"
+
+class AgentQueryRequest(BaseModel):
+    query: str = Field(..., description="User request prompt for the AI agent", examples=["Plan my Paris trip and include weather-friendly activities."])
+    destination: str = Field(..., description="Destination city/region", examples=["Paris"])
+    days: int = Field(default=2, description="Duration in days", examples=[2])
+    budget: float = Field(default=1000.0, description="Total budget limit", examples=[1000.0])
+    trip_style: str = Field(default="Cultural", description="Travel style preference", examples=["Cultural"])
+
+class AgentQueryResponse(BaseModel):
+    query: str
+    destination: str
+    tools_used: list[str] = Field(default_factory=list, description="List of tools invoked during planning")
+    itinerary: AIItinerarySchema | None = Field(default=None, description="Generated itinerary")
+    raw_response: str | None = Field(default=None, description="Raw agent output/summary")

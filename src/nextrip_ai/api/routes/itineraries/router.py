@@ -7,14 +7,20 @@ import urllib.parse
 from anthropic import Anthropic
 from pydantic import ValidationError
 
+from langchain_core.messages import HumanMessage, AIMessage
+
 from nextrip_ai.core.config import settings
 from nextrip_ai.core.dependencies import get_db, get_current_user
 from nextrip_ai.models.user import User
 from nextrip_ai.models.trip import Trip
 from nextrip_ai.models.itinerary import Itinerary
 from nextrip_ai.models.document_manifest import DocumentManifest
-from nextrip_ai.api.routes.itineraries.schema import ItineraryCreate, ItineraryResponse, AIItinerarySchema, DocumentIngest
+from nextrip_ai.api.routes.itineraries.schema import (
+    ItineraryCreate, ItineraryResponse, AIItinerarySchema, DocumentIngest,
+    AgentQueryRequest, AgentQueryResponse
+)
 from nextrip_ai.core.ingest import compute_sha256, chunk_document, upsert_to_pinecone
+from nextrip_ai.core.agent.graph import agent_graph
 
 logger = logging.getLogger(__name__)
 
@@ -387,37 +393,36 @@ def createItinerary(payload: ItineraryCreate, db: Session = Depends(get_db), cur
         db.refresh(itinerary)
         return itinerary
 
-    attempts = 0
-    max_attempts = 3
-    messages = None
-    validation_errors = []
-    itinerary_data = None
+    # Invoke LangGraph agent pipeline for AI itinerary generation
+    user_prompt = (
+        f"Plan a {trip.days}-day trip to {trip.destination} matching a '{trip.trip_style}' style "
+        f"with a budget of ${trip.budget:.2f}. Retrieve destination weather, guides, and places before generating."
+    )
+    initial_state = {
+        "messages": [HumanMessage(content=user_prompt)],
+        "destination": trip.destination,
+        "days": trip.days,
+        "budget": trip.budget,
+        "trip_style": trip.trip_style,
+        "itinerary_data": None,
+        "validation_errors": [],
+        "attempts": 0
+    }
 
-    while attempts < max_attempts:
-        attempts += 1
-        try:
-            logger.info(f"AI Generation attempt {attempts} for trip_id {trip.id}")
-            itinerary_data, messages = call_claude_to_generate(trip, messages)
-            validation_errors = validate_itinerary(itinerary_data, trip)
-            if not validation_errors:
-                break
-            else:
-                logger.error(f"Validation failed on attempt {attempts}: {validation_errors}")
-                feedback_str = (
-                    "The generated itinerary failed validation with the following errors:\n"
-                    + "\n".join(f"- {err}" for err in validation_errors)
-                    + "\nPlease correct these errors and generate the itinerary again using the generate_itinerary tool."
-                )
-                messages.append({"role": "user", "content": feedback_str})
-        except Exception as e:
-            logger.error(f"Error on attempt {attempts} during AI generation: {str(e)}")
-            validation_errors = [str(e)]
-            messages = None
+    try:
+        final_state = agent_graph.invoke(initial_state)
+        itinerary_data = final_state.get("itinerary_data")
+        validation_errors = final_state.get("validation_errors", [])
+    except Exception as e:
+        logger.error(f"Error during LangGraph agent execution: {e}")
+        itinerary_data = None
+        validation_errors = [str(e)]
 
-    if validation_errors:
+    if not itinerary_data or validation_errors:
+        err_msg = "; ".join(validation_errors) if validation_errors else "Agent failed to produce structured itinerary."
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"AI itinerary generation failed validation or errored: {'; '.join(validation_errors)}"
+            detail=f"AI itinerary generation failed validation or errored: {err_msg}"
         )
 
     itinerary = Itinerary(
@@ -430,6 +435,55 @@ def createItinerary(payload: ItineraryCreate, db: Session = Depends(get_db), cur
     db.commit()
     db.refresh(itinerary)
     return itinerary
+
+@itineraryRouter.post("/agent/query", response_model=AgentQueryResponse)
+def queryAgent(payload: AgentQueryRequest, current_user: User = Depends(get_current_user)):
+    """Interactive tool-using AI Agent endpoint that dynamically orchestrates tools based on user request."""
+    initial_state = {
+        "messages": [HumanMessage(content=payload.query)],
+        "destination": payload.destination,
+        "days": payload.days,
+        "budget": payload.budget,
+        "trip_style": payload.trip_style,
+        "itinerary_data": None,
+        "validation_errors": [],
+        "attempts": 0
+    }
+    
+    try:
+        final_state = agent_graph.invoke(initial_state)
+        messages = final_state.get("messages", [])
+        
+        tools_used = []
+        raw_output = None
+        for msg in messages:
+            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    tools_used.append(tc.get("name"))
+            elif isinstance(msg, AIMessage) and msg.content:
+                raw_output = str(msg.content)
+                
+        itinerary_data = final_state.get("itinerary_data")
+        parsed_itinerary = None
+        if itinerary_data:
+            try:
+                parsed_itinerary = AIItinerarySchema.model_validate(itinerary_data)
+            except Exception:
+                parsed_itinerary = None
+                
+        return AgentQueryResponse(
+            query=payload.query,
+            destination=payload.destination,
+            tools_used=list(dict.fromkeys(tools_used)),
+            itinerary=parsed_itinerary,
+            raw_response=raw_output
+        )
+    except Exception as e:
+        logger.error(f"Error during agent query execution: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Agent execution error: {str(e)}"
+        )
 
 @itineraryRouter.post("/ingest", status_code=status.HTTP_201_CREATED)
 def ingestDocument(payload: DocumentIngest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
