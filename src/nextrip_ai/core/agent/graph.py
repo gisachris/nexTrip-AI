@@ -11,15 +11,24 @@ from langgraph.prebuilt import ToolNode
 from nextrip_ai.core.config import settings
 from nextrip_ai.core.agent.tools import (
     agent_tools,
-    get_weather_tool,
     search_travel_knowledge_tool,
-    search_places_tool,
     estimate_travel_cost_tool,
     generate_itinerary_tool
 )
 from nextrip_ai.api.routes.itineraries.schema import AIItinerarySchema
 
 logger = logging.getLogger(__name__)
+
+# Combine direct LangChain tools with tools discovered from the MCP server
+try:
+    from nextrip_ai.mcp.client import get_mcp_tools_sync
+    mcp_tools = get_mcp_tools_sync()
+except Exception as e:
+    logger.warning(f"Failed to load MCP tools: {e}. Using direct tools only.")
+    mcp_tools = []
+
+all_agent_tools = agent_tools + mcp_tools
+
 
 class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], add_messages]
@@ -118,15 +127,15 @@ def agent_node(state: AgentState) -> Dict[str, Any]:
         )
         return {"messages": [tool_call_msg]}
 
-    llm_with_tools = llm.bind_tools(agent_tools)
+    llm_with_tools = llm.bind_tools(all_agent_tools)
     
     sys_prompt = SystemMessage(content=(
         "You are an expert, tool-using AI Travel Assistant.\n"
         "Your goal is to plan personalized travel itineraries using available tools.\n\n"
         "Guidelines:\n"
-        "1. First, check destination weather using `get_weather_tool`.\n"
+        "1. First, check destination weather using weather tool (`get_weather`).\n"
         "2. Retrieve relevant travel guides using `search_travel_knowledge_tool`.\n"
-        "3. Find popular attractions using `search_places_tool`.\n"
+        "3. Find popular attractions using places tool (`search_places`).\n"
         "4. Estimate travel expenses using `estimate_travel_cost_tool`.\n"
         "5. Finally, synthesize all retrieved context and submit the finished itinerary via `generate_itinerary_tool`.\n"
         "6. Always keep estimated total cost within the specified budget."
@@ -184,7 +193,7 @@ def agent_node(state: AgentState) -> Dict[str, Any]:
         )
         return {"messages": [tool_call_msg]}
 
-tool_node = ToolNode(agent_tools)
+tool_node = ToolNode(all_agent_tools)
 
 def extract_itinerary_node(state: AgentState) -> Dict[str, Any]:
     itinerary_data = state.get("itinerary_data")
