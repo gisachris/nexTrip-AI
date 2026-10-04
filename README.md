@@ -132,6 +132,16 @@ Once the application is running at `http://localhost:8000`, you can interact wit
 
 ---
 
+### Multimodal AI & MCP Integration
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/voice/transcribe` | Convert speech audio to text using OpenAI Whisper API |
+| `POST` | `/voice/speak` | Convert text to speech audio (MP3) using OpenAI TTS API |
+| `POST` | `/voice/analyze-image` | Analyze travel photos and landmarks using Claude Vision |
+
+---
+
 ## Configuration
 
 Create a `.env` file in the project root with the following variables:
@@ -141,6 +151,8 @@ DATABASE_URL=postgresql://postgres:postgres@localhost:5432/nextrip_ai_db
 SECRET_KEY=your_secret_key_here
 ALGORITHM=HS256
 ACCESS_TOKEN_EXPIRE_MINUTES=30
+ANTHROPIC_API_KEY=your_anthropic_key_here
+OPENAI_API_KEY=your_openai_key_here
 ```
 
 | Variable | Description |
@@ -149,6 +161,8 @@ ACCESS_TOKEN_EXPIRE_MINUTES=30
 | `SECRET_KEY` | Secret key used to sign JWT tokens — use a long random string in production |
 | `ALGORITHM` | JWT signing algorithm — `HS256` by default |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | How long a JWT token remains valid in minutes |
+| `ANTHROPIC_API_KEY` | API key for Anthropic Claude LLM and Claude Vision |
+| `OPENAI_API_KEY` | API key for OpenAI Whisper STT, TTS, and embeddings |
 
 ---
 
@@ -162,18 +176,25 @@ src/nextrip_ai/
 │   └── routes/
 │       ├── auth/         # Register, login, user profile
 │       ├── trips/        # Trip CRUD
-│       └── itineraries/  # Itinerary creation, ingestion, and agent queries
+│       ├── itineraries/  # Itinerary creation, ingestion, and agent queries
+│       └── voice/        # Speech-to-text, text-to-speech, and vision analysis
 │   └── static/
 │       └── images/       # Branding assets
 ├── core/
-│   ├── agent/            # Phase 5 LangChain & LangGraph Orchestration Subsystem
+│   ├── agent/            # Phase 5 & 6 LangChain & LangGraph Orchestration Subsystem
 │   │   ├── graph.py      # LangGraph state machine agent definition
-│   │   └── tools.py      # LangChain tool suite (Weather, RAG, Places, Pricing, Generator)
+│   │   └── tools.py      # LangChain direct tool suite (RAG, Pricing, Generator)
+│   ├── multimodal/       # Phase 6 Multimodal Subsystem
+│   │   ├── speech.py     # OpenAI Whisper STT + TTS speech synthesis
+│   │   └── vision.py     # Claude Vision photo and landmark analysis
 │   ├── config.py         # Environment-based settings
 │   ├── database.py       # SQLAlchemy engine and session
 │   ├── security.py       # Password hashing and JWT
 │   ├── dependencies.py   # Reusable FastAPI dependencies
 │   └── ingest.py         # Chunking, hashing & Pinecone vector storage
+├── mcp/                  # Phase 6 Model Context Protocol (MCP) Subsystem
+│   ├── server.py         # FastMCP stdio server (Weather & Places tools)
+│   └── client.py         # MCP stdio client adapter for LangGraph tool loading
 ├── models/
 │   ├── user.py           # User database model
 │   ├── trip.py           # Trip database model
@@ -189,18 +210,14 @@ src/nextrip_ai/
 - JWT authentication is handled via `HTTPBearer` — token is passed in the `Authorization: Bearer <token>` header
 - Itinerary days and activities are stored as JSON in PostgreSQL / SQLite
 - All trip and itinerary routes are scoped to the authenticated user — users can only access their own data
-- **Phase 5 Tool-Using AI Agent (LangGraph & LangChain)**:
-  - **LangGraph State Graph (`src/nextrip_ai/core/agent/graph.py`)**: Implements a `StateGraph` state machine orchestrating agent decision-making, tool execution, result aggregation, and validation.
-  - **Tool Orchestration (`src/nextrip_ai/core/agent/tools.py`)**: Provides dynamic tools:
-    - 🌤️ `get_weather_tool`: Fetches real-time weather & forecast via Open-Meteo API.
-    - 📚 `search_travel_knowledge_tool`: Vector search against Pinecone travel guides.
-    - 📍 `search_places_tool`: Discovers destination attractions via OpenStreetMap Nominatim.
-    - 💵 `estimate_travel_cost_tool`: Calculates daily expense breakdowns (accommodation, meals, transport, activities).
-    - 📝 `generate_itinerary_tool`: Submits structured output matching `AIItinerarySchema`.
-  - **Agent Flow**: `User request → Agent decides → Tool(s) run → LLM combines results → Validation → Response`
-  - **Interactive Agent Endpoint (`POST /itineraries/agent/query`)**: Allows direct natural language queries (e.g. *"Plan my Paris trip and include weather-friendly activities"*), returning executed tools and generated plans.
-- **Pydantic Validation & Retry Loop**: Converts and validates generated itineraries against `AIItinerarySchema`, budget limits, and duration. Retries with LLM feedback up to 3 times if constraints fail.
-- **Travel Knowledge Base (RAG)**: Integrates Pinecone serverless vector database and OpenAI embeddings (`text-embedding-3-small`) to ingest destination guidelines and query them dynamically during itinerary generation.
+- **Phase 6 MCP (Model Context Protocol) Integration**:
+  - **FastMCP Stdio Server (`src/nextrip_ai/mcp/server.py`)**: Exposes weather lookup (`get_weather`) and landmark search (`search_places`) tools over standard I/O (stdio) transport.
+  - **MCP Client Adapter (`src/nextrip_ai/mcp/client.py`)**: Uses `langchain-mcp-adapters` to discover and convert MCP tools into LangChain-compatible tools at agent startup.
+  - **Hybrid Tool Strategy**: Weather and places tools run on the standalone MCP server, while RAG search, cost estimation, and itinerary generation run as direct LangChain tools in the main app process.
+- **Phase 6 Multimodal Capabilities**:
+  - **Speech-to-Text (`POST /voice/transcribe`)**: Converts audio recordings into text queries using OpenAI Whisper (`whisper-1`).
+  - **Text-to-Speech (`POST /voice/speak`)**: Synthesizes agent responses or itinerary summaries into MP3 audio via OpenAI TTS (`gpt-4o-mini-tts`).
+  - **Image Understanding (`POST /voice/analyze-image`)**: Accepts travel photos (JPEG, PNG, WebP) and uses Claude Vision (`claude-3-5-sonnet-20241022`) to identify landmarks, assess weather cues, and return travel recommendations.
 - **CDC Manifest Tracking**: Uses a database-backed `DocumentManifest` table to track hash changes on documents, preventing redundant indexing and API uploads.
 - API is fully documented via Swagger at `/docs` 
 
