@@ -1,0 +1,514 @@
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+import json
+import logging
+import urllib.request
+import urllib.parse
+from anthropic import Anthropic
+from pydantic import ValidationError
+
+from langchain_core.messages import HumanMessage, AIMessage
+
+from nextrip_ai.core.config import settings
+from nextrip_ai.core.dependencies import get_db, get_current_user
+from nextrip_ai.models.user import User
+from nextrip_ai.models.trip import Trip
+from nextrip_ai.models.itinerary import Itinerary
+from nextrip_ai.models.document_manifest import DocumentManifest
+from nextrip_ai.api.routes.itineraries.schema import (
+    ItineraryCreate, ItineraryResponse, AIItinerarySchema, DocumentIngest,
+    AgentQueryRequest, AgentQueryResponse
+)
+from nextrip_ai.core.ingest import compute_sha256, chunk_document, upsert_to_pinecone
+from nextrip_ai.core.agent.graph import agent_graph
+
+logger = logging.getLogger(__name__)
+
+itineraryRouter = APIRouter(prefix="/itineraries", tags=["itineraries"])
+
+tool_schema = {
+    "name": "generate_itinerary",
+    "description": "Generate a structured travel itinerary matching the required schema exactly.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "title": {
+                "type": "string",
+                "description": "Title of the itinerary"
+            },
+            "destination": {
+                "type": "string",
+                "description": "Destination city/region of the trip"
+            },
+            "travel_style": {
+                "type": "string",
+                "description": "Travel style of the trip"
+            },
+            "budget": {
+                "type": "number",
+                "description": "The target budget for the trip"
+            },
+            "estimated_total_cost": {
+                "type": "number",
+                "description": "The estimated total cost of the trip"
+            },
+            "days": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "day_number": {
+                            "type": "integer",
+                            "description": "Day number, starting from 1"
+                        },
+                        "theme": {
+                            "type": "string",
+                            "description": "Theme for this day"
+                        },
+                        "estimated_cost": {
+                            "type": "number",
+                            "description": "Estimated total cost for this day"
+                        },
+                        "activities": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "time": {
+                                        "type": "string",
+                                        "description": "Time of day (e.g. Morning, Afternoon, Evening)"
+                                    },
+                                    "activity": {
+                                        "type": "string",
+                                        "description": "Name of the activity"
+                                    },
+                                    "location": {
+                                        "type": "string",
+                                        "description": "Location or attraction name"
+                                    },
+                                    "description": {
+                                        "type": "string",
+                                        "description": "Description of what the traveler will do"
+                                    },
+                                    "estimated_cost": {
+                                        "type": "number",
+                                        "description": "Estimated cost for this activity"
+                                    }
+                                },
+                                "required": ["time", "activity", "location", "description", "estimated_cost"]
+                            }
+                        }
+                    },
+                    "required": ["day_number", "theme", "estimated_cost", "activities"]
+                }
+            }
+        },
+        "required": ["title", "destination", "travel_style", "budget", "estimated_total_cost", "days"]
+    }
+}
+
+weather_tool_schema = {
+    "name": "get_weather",
+    "description": "Look up real-time current weather conditions and forecast for a given destination.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "location": {
+                "type": "string",
+                "description": "The city/region to look up the weather for (e.g. 'Paris', 'Tokyo')."
+            }
+        },
+        "required": ["location"]
+    }
+}
+
+def get_weather(location: str) -> str:
+    try:
+        encoded_loc = urllib.parse.quote(location)
+        geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={encoded_loc}&count=1&language=en&format=json"
+        
+        req_geo = urllib.request.Request(geo_url, headers={'User-Agent': 'nexTrip-AI/0.1.0'})
+        with urllib.request.urlopen(req_geo, timeout=5) as response:
+            geo_data = json.loads(response.read().decode())
+            
+        if "results" not in geo_data or not geo_data["results"]:
+            return f"Weather unavailable: location '{location}' not found."
+            
+        result = geo_data["results"][0]
+        lat = result["latitude"]
+        lon = result["longitude"]
+        name = result.get("name", location)
+        country = result.get("country", "")
+        
+        forecast_url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true"
+        req_weather = urllib.request.Request(forecast_url, headers={'User-Agent': 'nexTrip-AI/0.1.0'})
+        with urllib.request.urlopen(req_weather, timeout=5) as response:
+            weather_data = json.loads(response.read().decode())
+            
+        if "current_weather" not in weather_data:
+            return f"Weather data not available for coordinates {lat}, {lon} ({name}, {country})."
+            
+        cw = weather_data["current_weather"]
+        temp = cw.get("temperature", "unknown")
+        windspeed = cw.get("windspeed", "unknown")
+        weathercode = cw.get("weathercode", -1)
+        
+        descriptions = {
+            0: "Clear sky", 1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast",
+            45: "Fog", 48: "Depositing rime fog",
+            51: "Light drizzle", 53: "Moderate drizzle", 55: "Dense drizzle",
+            61: "Slight rain", 63: "Moderate rain", 65: "Heavy rain",
+            71: "Slight snow fall", 73: "Moderate snow fall", 75: "Heavy snow fall",
+            77: "Snow grains",
+            80: "Slight rain showers", 81: "Moderate rain showers", 82: "Violent rain showers",
+            85: "Slight snow showers", 86: "Heavy snow showers",
+            95: "Thunderstorm", 96: "Thunderstorm with slight hail", 99: "Thunderstorm with heavy hail"
+        }
+        desc = descriptions.get(weathercode, "Variable/Unspecified")
+        return f"Weather in {name}, {country}: {temp}°C, {desc}. Wind speed: {windspeed} km/h."
+    except Exception as e:
+        return f"Error looking up weather for '{location}': {str(e)}"
+
+def query_pinecone_knowledge(destination: str, query_text: str, top_k: int = 4) -> list[dict]:
+    if not settings.PINECONE_API_KEY or "mock" in settings.PINECONE_API_KEY.lower():
+        return []
+        
+    from nextrip_ai.core.ingest import get_embeddings
+    from pinecone import Pinecone
+    
+    try:
+        pc = Pinecone(api_key=settings.PINECONE_API_KEY)
+        index_name = settings.PINECONE_INDEX_NAME
+        existing_indexes = [idx.name for idx in pc.list_indexes()]
+        if index_name not in existing_indexes:
+            return []
+            
+        index = pc.Index(index_name)
+        query_vector = get_embeddings([query_text])[0]
+        
+        res = index.query(
+            namespace=destination.lower(),
+            vector=query_vector,
+            top_k=top_k,
+            include_metadata=True
+        )
+        
+        results = []
+        for match in res.get("matches", []):
+            if match.get("score", 0.0) >= 0.65:
+                results.append(match.get("metadata", {}))
+        return results
+    except Exception as e:
+        logger.error(f"Error querying pinecone: {e}")
+        return []
+
+def call_claude_to_generate(trip: Trip, messages: list = None) -> tuple[dict, list]:
+    client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+    
+    system_prompt = (
+        "You are an expert travel planner.\n\n"
+        "Your task is to create realistic travel itineraries based on trip information, local destination guides, and weather conditions.\n\n"
+        "Follow these rules strictly:\n"
+        "1. Only recommend attractions, restaurants, landmarks, museums, parks, and activities located inside the specified destination.\n"
+        "2. Do not recommend locations outside the destination city or region.\n"
+        "3. Respect the provided budget.\n"
+        "4. Distribute activities realistically throughout the day.\n"
+        "5. Avoid impossible schedules.\n"
+        "6. Consider travel time between attractions.\n"
+        "7. Include a mix of sightseeing, meals, relaxation, and local experiences.\n"
+        "8. Do not invent fictional locations.\n"
+        "9. Use well-known and verifiable attractions whenever possible.\n"
+        "10. Look up the weather conditions for the destination city using the get_weather tool BEFORE generating the final itinerary, and use the retrieved weather details to optimize the travel plan (e.g., recommend indoor activities if it is rainy/cold, outdoor if sunny/warm).\n"
+        "11. Incorporate local knowledge context from the retrieved travel guides to recommend matching spots.\n"
+        "12. Return ONLY the final JSON itinerary via the generate_itinerary tool call.\n"
+        "13. Do not include markdown.\n"
+        "14. Do not include explanations.\n"
+        "15. Do not include code blocks.\n"
+        "16. The final itinerary must match the required schema exactly."
+    )
+
+    retrieved_chunks = query_pinecone_knowledge(trip.destination, f"attractions and guides for {trip.destination} {trip.trip_style}")
+    knowledge_context = ""
+    if retrieved_chunks:
+        knowledge_context = "Retrieved Local Knowledge:\n" + "\n---\n".join(
+            f"Title: {c.get('title')}\nCategory: {c.get('category')}\nContent: {c.get('text')}"
+            for c in retrieved_chunks
+        )
+    else:
+        knowledge_context = "No additional travel knowledge base context found."
+
+    weather_info = get_weather(trip.destination)
+
+    user_content = []
+    if knowledge_context:
+        user_content.append({
+            "type": "text",
+            "text": f"Destination Context:\n{knowledge_context}",
+            "cache_control": {"type": "ephemeral"}
+        })
+    user_content.append({
+        "type": "text",
+        "text": f"Current Weather & Forecast:\n{weather_info}"
+    })
+    
+    user_prompt = (
+        f"Generate a travel itinerary using the following trip details.\n\n"
+        f"Trip Details:\n"
+        f"Destination: {trip.destination}\n"
+        f"Number of Days: {trip.days}\n"
+        f"Budget: {trip.budget}\n"
+        f"Travel Style: {trip.trip_style}\n\n"
+        f"Requirements:\n"
+        f"* Adjust the activities and suggestions based on the weather forecast and the provided destination context.\n"
+        f"* Create a detailed itinerary for every day.\n"
+        f"* Keep activities geographically sensible.\n"
+        f"* Avoid excessive travel between locations.\n"
+        f"* Include morning, afternoon, and evening activities.\n"
+        f"* Include meal suggestions.\n"
+        f"* Estimate approximate activity costs.\n"
+        f"* Keep total estimated spending within the trip budget.\n"
+        f"* Focus on attractions matching the travel style.\n"
+        f"* Only include places located within the destination area.\n"
+        f"* Use real attractions and locations.\n"
+        f"* Use the generate_itinerary tool to return the final result."
+    )
+    user_content.append({
+        "type": "text",
+        "text": user_prompt
+    })
+
+    if not messages:
+        messages = [{"role": "user", "content": user_content}]
+        
+    tools = [tool_schema, weather_tool_schema]
+
+    for _ in range(5):
+        response = client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=4000,
+            temperature=0.3,
+            system=system_prompt,
+            messages=messages,
+            tools=tools
+        )
+        
+        assistant_content = []
+        for block in response.content:
+            if block.type == "text":
+                assistant_content.append({"type": "text", "text": block.text})
+            elif block.type == "tool_use":
+                assistant_content.append({
+                    "type": "tool_use",
+                    "id": block.id,
+                    "name": block.name,
+                    "input": block.input
+                })
+        
+        messages.append({"role": "assistant", "content": assistant_content})
+        
+        tool_use_calls = [block for block in response.content if block.type == "tool_use"]
+        
+        if not tool_use_calls:
+            messages.append({
+                "role": "user",
+                "content": "Please generate the itinerary by invoking the generate_itinerary tool."
+            })
+            continue
+            
+        tool_results = []
+        generate_itinerary_input = None
+        
+        for tool_call in tool_use_calls:
+            if tool_call.name == "get_weather":
+                loc = tool_call.input.get("location", trip.destination)
+                w_info = get_weather(loc)
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tool_call.id,
+                    "content": f"Weather lookup results: {w_info}"
+                })
+            elif tool_call.name == "generate_itinerary":
+                generate_itinerary_input = tool_call.input
+                
+        if generate_itinerary_input is not None:
+            return generate_itinerary_input, messages
+            
+        if tool_results:
+            messages.append({"role": "user", "content": tool_results})
+            
+    raise ValueError("Claude did not invoke the generate_itinerary tool after 5 turns.")
+
+def validate_itinerary(data: dict, trip: Trip) -> list[str]:
+    errors = []
+    
+    try:
+        validated = AIItinerarySchema.model_validate(data)
+    except ValidationError as e:
+        for err in e.errors():
+            loc = " -> ".join(str(x) for x in err["loc"])
+            errors.append(f"Schema validation error at '{loc}': {err['msg']}")
+        return errors
+        
+    if len(validated.days) != trip.days:
+        errors.append(f"Day count ({len(validated.days)}) does not match trip duration ({trip.days})")
+        
+    dest = validated.destination
+    if trip.destination.lower() not in dest.lower() and dest.lower() not in trip.destination.lower():
+        errors.append(f"Destination '{dest}' does not match trip destination '{trip.destination}'")
+        
+    est_total = validated.estimated_total_cost
+    limit = trip.budget * 1.10
+    if est_total > limit:
+        errors.append(f"Estimated total cost {est_total} exceeds budget {trip.budget} by more than 10% (limit is {limit})")
+        
+    return errors
+
+@itineraryRouter.get("/{trip_id}", response_model=ItineraryResponse)
+def getItineraryByTripId(trip_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    trip = db.query(Trip).filter(Trip.id == trip_id, Trip.user_id == current_user.id).first()
+    if not trip:
+        raise HTTPException(status_code=404, detail="Trip not found")
+    itinerary = db.query(Itinerary).filter(Itinerary.trip_id == trip_id).first()
+    if not itinerary:
+        raise HTTPException(status_code=404, detail="Itinerary not found")
+    return itinerary
+
+@itineraryRouter.post("/", response_model=ItineraryResponse, status_code=status.HTTP_201_CREATED)
+def createItinerary(payload: ItineraryCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    trip = db.query(Trip).filter(Trip.id == payload.trip_id, Trip.user_id == current_user.id).first()
+    if not trip:
+        raise HTTPException(status_code=404, detail="Trip not found")
+    if db.query(Itinerary).filter(Itinerary.trip_id == payload.trip_id).first():
+        raise HTTPException(status_code=400, detail="Itinerary already exists for this trip")
+
+    if payload.days is not None:
+        itinerary = Itinerary(
+            trip_id=payload.trip_id,
+            days=[d.model_dump() for d in payload.days],
+            generated_by_ai=False,
+            itinerary_json=None
+        )
+        db.add(itinerary)
+        db.commit()
+        db.refresh(itinerary)
+        return itinerary
+
+    # Invoke LangGraph agent pipeline for AI itinerary generation
+    user_prompt = (
+        f"Plan a {trip.days}-day trip to {trip.destination} matching a '{trip.trip_style}' style "
+        f"with a budget of ${trip.budget:.2f}. Retrieve destination weather, guides, and places before generating."
+    )
+    initial_state = {
+        "messages": [HumanMessage(content=user_prompt)],
+        "destination": trip.destination,
+        "days": trip.days,
+        "budget": trip.budget,
+        "trip_style": trip.trip_style,
+        "itinerary_data": None,
+        "validation_errors": [],
+        "attempts": 0
+    }
+
+    try:
+        final_state = agent_graph.invoke(initial_state)
+        itinerary_data = final_state.get("itinerary_data")
+        validation_errors = final_state.get("validation_errors", [])
+    except Exception as e:
+        logger.error(f"Error during LangGraph agent execution: {e}")
+        itinerary_data = None
+        validation_errors = [str(e)]
+
+    if not itinerary_data or validation_errors:
+        err_msg = "; ".join(validation_errors) if validation_errors else "Agent failed to produce structured itinerary."
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"AI itinerary generation failed validation or errored: {err_msg}"
+        )
+
+    itinerary = Itinerary(
+        trip_id=payload.trip_id,
+        days=None,
+        generated_by_ai=True,
+        itinerary_json=itinerary_data
+    )
+    db.add(itinerary)
+    db.commit()
+    db.refresh(itinerary)
+    return itinerary
+
+@itineraryRouter.post("/agent/query", response_model=AgentQueryResponse)
+def queryAgent(payload: AgentQueryRequest, current_user: User = Depends(get_current_user)):
+    """Interactive tool-using AI Agent endpoint that dynamically orchestrates tools based on user request."""
+    initial_state = {
+        "messages": [HumanMessage(content=payload.query)],
+        "destination": payload.destination,
+        "days": payload.days,
+        "budget": payload.budget,
+        "trip_style": payload.trip_style,
+        "itinerary_data": None,
+        "validation_errors": [],
+        "attempts": 0
+    }
+    
+    try:
+        final_state = agent_graph.invoke(initial_state)
+        messages = final_state.get("messages", [])
+        
+        tools_used = []
+        raw_output = None
+        for msg in messages:
+            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    tools_used.append(tc.get("name"))
+            elif isinstance(msg, AIMessage) and msg.content:
+                raw_output = str(msg.content)
+                
+        itinerary_data = final_state.get("itinerary_data")
+        parsed_itinerary = None
+        if itinerary_data:
+            try:
+                parsed_itinerary = AIItinerarySchema.model_validate(itinerary_data)
+            except Exception:
+                parsed_itinerary = None
+                
+        return AgentQueryResponse(
+            query=payload.query,
+            destination=payload.destination,
+            tools_used=list(dict.fromkeys(tools_used)),
+            itinerary=parsed_itinerary,
+            raw_response=raw_output
+        )
+    except Exception as e:
+        logger.error(f"Error during agent query execution: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Agent execution error: {str(e)}"
+        )
+
+@itineraryRouter.post("/ingest", status_code=status.HTTP_201_CREATED)
+def ingestDocument(payload: DocumentIngest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    text_hash = compute_sha256(payload.content)
+    
+    manifest = db.query(DocumentManifest).filter(DocumentManifest.document_id == payload.document_id).first()
+    if manifest:
+        if manifest.content_hash == text_hash:
+            return {"status": "skipped", "message": "Document content unchanged."}
+        manifest.content_hash = text_hash
+    else:
+        manifest = DocumentManifest(document_id=payload.document_id, content_hash=text_hash)
+        db.add(manifest)
+        
+    db.commit()
+    
+    chunks = chunk_document(payload.content)
+    upsert_to_pinecone(
+        namespace=payload.destination.lower(),
+        document_id=payload.document_id,
+        title=payload.title,
+        chunks=chunks,
+        destination=payload.destination,
+        category=payload.category,
+        estimated_cost=payload.estimated_cost
+    )
+    
+    return {"status": "success", "message": f"Ingested {len(chunks)} chunks."}
